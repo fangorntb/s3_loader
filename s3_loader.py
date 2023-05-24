@@ -14,13 +14,6 @@ from boto3 import Session
 from botocore.config import Config
 
 
-@dataclass()
-class Creds:
-    secret_access_key: str
-    aws_session_token: str
-    region_name: str
-    botocore_session: str
-    profile_name: str
 
 
 def close(func):
@@ -60,7 +53,6 @@ def remove_starting_strings(lst: list[str]):
 
 class S3SessionPoolFactory:
     sessions = dict()
-    creds = dict()
 
     def __new__(
             cls,
@@ -112,18 +104,9 @@ class S3SessionPool:
                 config=Config(retries={'max_attempts': 100}),
                 **config,
             )
-
-    # self.session_pool.sessions[access_key_id] = self.session_pool.sessions.get(access_key_id).client(
-    #     service_name=self.service_name,
-    #     **config,
-    # )
-
+            
     def __getitem__(self, access_key_id: str):
         return self.session_pool.sessions[access_key_id]
-
-    def get_creds(self, access_key_id: str):
-        return self.session_pool.creds[access_key_id]
-
 
 class S3:
     def __init__(self, session_pool: S3SessionPool, access_key_id: str, threads: int, **config):
