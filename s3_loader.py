@@ -282,7 +282,7 @@ class S3:
         """upload directory to s3"""
         local_files = list(get_files_names(local_directory))
         if count is None:
-            count = len(local_files) + 1
+            count = len(local_files)
         s3_path = lambda x: str(
             self.normalize_path(s3_directory) + x.replace(
                 self.normalize_path(f'{Path(local_directory).absolute()}'),
