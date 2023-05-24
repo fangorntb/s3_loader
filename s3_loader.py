@@ -3,17 +3,13 @@
 import os
 import re
 from contextlib import suppress
-from dataclasses import dataclass
 from functools import wraps
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import List
 
-import boto3
 from boto3 import Session
 from botocore.config import Config
-
-
 
 
 def close(func):
@@ -104,9 +100,10 @@ class S3SessionPool:
                 config=Config(retries={'max_attempts': 100}),
                 **config,
             )
-            
+
     def __getitem__(self, access_key_id: str):
         return self.session_pool.sessions[access_key_id]
+
 
 class S3:
     def __init__(self, session_pool: S3SessionPool, access_key_id: str, threads: int, **config):
