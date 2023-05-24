@@ -3,12 +3,24 @@
 import os
 import re
 from contextlib import suppress
+from dataclasses import dataclass
 from functools import wraps
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
-from typing import Any, List
+from typing import List
 
+import boto3
 from boto3 import Session
+from botocore.config import Config
+
+
+@dataclass()
+class Creds:
+    secret_access_key: str
+    aws_session_token: str
+    region_name: str
+    botocore_session: str
+    profile_name: str
 
 
 def close(func):
@@ -21,6 +33,8 @@ def close(func):
                 lambda x: x.close() if not isinstance(x, Session) else None,
                 self.session_pool.session_pool.sessions.values()
             )
+            exit()
+
     return _
 
 
@@ -45,7 +59,8 @@ def remove_starting_strings(lst: list[str]):
 
 
 class S3SessionPoolFactory:
-    sessions: dict[Any, Any] = dict()
+    sessions = dict()
+    creds = dict()
 
     def __new__(
             cls,
@@ -92,13 +107,22 @@ class S3SessionPool:
 
     def __setitem__(self, access_key_id: str, config: dict):
         if isinstance(self.session_pool.sessions.get(access_key_id), Session):
-            self.session_pool.sessions[access_key_id] = self.session_pool.sessions.get(access_key_id).client(
+            self.session_pool.sessions[access_key_id] = self.session_pool.sessions.get(access_key_id).resource(
                 service_name=self.service_name,
+                config=Config(retries={'max_attempts': 100}),
                 **config,
             )
 
+    # self.session_pool.sessions[access_key_id] = self.session_pool.sessions.get(access_key_id).client(
+    #     service_name=self.service_name,
+    #     **config,
+    # )
+
     def __getitem__(self, access_key_id: str):
         return self.session_pool.sessions[access_key_id]
+
+    def get_creds(self, access_key_id: str):
+        return self.session_pool.creds[access_key_id]
 
 
 class S3:
@@ -115,27 +139,12 @@ class S3:
             prefix: str = '',
     ):
         """get list of files"""
-        if prefix == '*':
-            prefix = ''
-        get_path = lambda x: x.get('Key')
-        return list(
-                remove_starting_strings(
-                    list(
-                        map(
-                            get_path, list(
-                                self.session_pool[access_key_id].list_objects(
-                                    Bucket=bucket,
-                                    Prefix=prefix,
-                                ).get('Contents')
-                            )
-                        )
-                    )
-                )
-            )
+        bucket = self.session_pool[access_key_id].Bucket(bucket)
+        return list(map(lambda x: x.key, bucket.objects.filter(Prefix=prefix).all()))
 
     @staticmethod
     def normalize_path(_s: str) -> str:
-        return _s[0].replace('.', 'data') + _s[0:].replace('\\', '/') if _s else ''
+        return (_s[0].replace('.', 'data') + _s[1:].replace('\\', '/')) if _s else ''
 
     @close
     def upload(
@@ -147,18 +156,15 @@ class S3:
             existing_s3_paths: List[str] = None,
     ):
         """upload single file"""
-        if not existing_s3_paths:
+        obj = self.session_pool[access_key_id].Object(bucket, key=s3_path)
+        if existing_s3_paths is None:
             existing_s3_paths = []
         if s3_path is None:
             s3_path = local_path.replace('.', 'data').replace('\\', '/')
         s3_path = s3_path.lstrip('/')
         if s3_path not in existing_s3_paths:
             with open(Path(local_path), 'rb') as f:
-                self.session_pool[access_key_id].put_object(
-                    Bucket=bucket,
-                    Key=s3_path,
-                    Body=f.read(),
-                )
+                obj.put(Body=f.read(), )
 
     @close
     def upload_from_bytes(
@@ -188,7 +194,11 @@ class S3:
         Path('/'.join(local_path.split('/')[:-1])).mkdir(exist_ok=True, parents=True)
         with suppress(IsADirectoryError):
             if not Path(local_path).exists() or update:
-                return self.session_pool[access_key_id].download_file(bucket, s3_path, local_path)
+                with open(local_path, 'wb') as f:
+                    obj = self.session_pool[access_key_id].Object(bucket, s3_path)
+                    body = obj.get().get('Body')
+                    if body:
+                        f.write(body.read())
 
     @close
     def download_files_list(
@@ -212,12 +222,17 @@ class S3:
             local_directory: str,
             s3_directory: str = '',
             update: bool = True,
+            count: int = None,
     ):
         """download dir from s3"""
         s3_paths = self.list_dirs(access_key_id, bucket, s3_directory)
         if not local_directory.endswith('/'):
             local_directory += '/'
-        local_paths = list(map(lambda x: str(Path(local_directory).joinpath(x)).replace(s3_directory, ''), s3_paths))
+        if count is None:
+            count = len(s3_paths)
+        local_paths = list(
+            map(lambda x: str(Path(local_directory).joinpath(x)).replace(s3_directory, ''), s3_paths)
+        )[:count]
         self.download_files_list(access_key_id, bucket, local_paths, s3_paths, update)
 
     @close
@@ -265,7 +280,7 @@ class S3:
         existing_s3_paths = []
         if s3_paths is None:
             s3_paths = local_files
-        if update:
+        if not update:
             existing_s3_paths = self.list_dirs(access_key_id, bucket, '')
         uploader = lambda x: self.upload(*x)
         args = map(
@@ -282,16 +297,25 @@ class S3:
             local_directory: str,
             s3_directory: str = '',
             update: bool = True,
+            count: int = None,
     ):
         """upload directory to s3"""
-        local_files = frozenset(get_files_names(local_directory))
-        s3_path = lambda x: ('/' if not s3_directory.startswith('/') else '') + str(
-            Path(self.normalize_path(s3_directory)).joinpath(self.normalize_path(x))
-        ).replace(local_directory, '')
+        local_files = list(get_files_names(local_directory))
+        if count is None:
+            count = len(local_files) + 1
+        s3_path = lambda x: str(
+            self.normalize_path(s3_directory) + x.replace(
+                self.normalize_path(f'{Path(local_directory).absolute()}'),
+                '')
+        )
         self.upload_files_list(
             access_key_id,
             bucket,
             local_files=local_files,
-            s3_paths=map(s3_path, local_files),
+            s3_paths=list(map(s3_path, local_files))[:count],
             update=update,
         )
+
+    def __del__(self):
+        self.threadpool.close()
+        del self
