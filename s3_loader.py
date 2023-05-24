@@ -287,7 +287,7 @@ class S3:
         local_files = frozenset(get_files_names(local_directory))
         s3_path = lambda x: ('/' if not s3_directory.startswith('/') else '') + str(
             Path(self.normalize_path(s3_directory)).joinpath(self.normalize_path(x))
-        )
+        ).replace(local_directory, '')
         self.upload_files_list(
             access_key_id,
             bucket,
