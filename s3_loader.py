@@ -21,7 +21,6 @@ def close(func):
                 lambda x: x.close() if not isinstance(x, Session) else None,
                 self.session_pool.session_pool.sessions.values()
             )
-
     return _
 
 
@@ -110,27 +109,29 @@ class S3:
 
     @close
     def list_dirs(
-            self, 
-            access_key_id: str, 
-            bucket: str | bytes, 
+            self,
+            access_key_id: str,
+            bucket: str | bytes,
             prefix: str = '',
     ):
         """get list of files"""
         if prefix == '*':
             prefix = ''
         get_path = lambda x: x.get('Key')
-        return remove_starting_strings(
-            list(
-                map(
-                    get_path, list(
-                        self.session_pool[access_key_id].list_objects(
-                            Bucket=bucket,
-                            Prefix=prefix,
-                        ).get('Contents')
+        return list(
+                remove_starting_strings(
+                    list(
+                        map(
+                            get_path, list(
+                                self.session_pool[access_key_id].list_objects(
+                                    Bucket=bucket,
+                                    Prefix=prefix,
+                                ).get('Contents')
+                            )
+                        )
                     )
                 )
             )
-        )
 
     @staticmethod
     def normalize_path(_s: str) -> str:
@@ -143,17 +144,21 @@ class S3:
             bucket: str | bytes,
             local_path: str,
             s3_path: str = None,
+            existing_s3_paths: List[str] = None,
     ):
         """upload single file"""
+        if not existing_s3_paths:
+            existing_s3_paths = []
         if s3_path is None:
             s3_path = local_path.replace('.', 'data').replace('\\', '/')
         s3_path = s3_path.lstrip('/')
-        with open(Path(local_path), 'rb') as f:
-            self.session_pool[access_key_id].put_object(
-                        Bucket=bucket,
-                        Key=s3_path,
-                        Body=f.read(),
-        )
+        if s3_path not in existing_s3_paths:
+            with open(Path(local_path), 'rb') as f:
+                self.session_pool[access_key_id].put_object(
+                    Bucket=bucket,
+                    Key=s3_path,
+                    Body=f.read(),
+                )
 
     @close
     def upload_from_bytes(
@@ -177,12 +182,13 @@ class S3:
             bucket: str | bytes,
             local_path: str,
             s3_path: str = None,
+            update: bool = True,
     ):
         """download single file"""
         Path('/'.join(local_path.split('/')[:-1])).mkdir(exist_ok=True, parents=True)
         with suppress(IsADirectoryError):
-            return self.session_pool[access_key_id].download_file(bucket, s3_path, local_path)
-        print(bucket, s3_path, local_path)
+            if not Path(local_path).exists() or update:
+                return self.session_pool[access_key_id].download_file(bucket, s3_path, local_path)
 
     @close
     def download_files_list(
@@ -191,9 +197,10 @@ class S3:
             bucket: str,
             local_paths: List[str],
             s3_paths: List[str],
+            update: bool = True,
     ):
         """download list of files"""
-        args = map(lambda x: [access_key_id] + [bucket] + list(x), zip(list(map(Path, local_paths)), s3_paths))
+        args = map(lambda x: [access_key_id] + [bucket] + list(x) + [update], zip(local_paths, s3_paths))
         downloader = lambda x: self.download(*x)
         iterate(self.threadpool.imap_unordered(downloader, args))
 
@@ -204,15 +211,14 @@ class S3:
             bucket: str,
             local_directory: str,
             s3_directory: str = '',
+            update: bool = True,
     ):
         """download dir from s3"""
-        s3_files = frozenset(self.list_dirs(access_key_id, bucket, s3_directory))
+        s3_paths = self.list_dirs(access_key_id, bucket, s3_directory)
         if not local_directory.endswith('/'):
             local_directory += '/'
-        dirs = map(lambda x: str(Path(local_directory).joinpath(x)), s3_files)
-        args = map(lambda x: [access_key_id] + [bucket] + list(x), zip(dirs, s3_files))
-        downloader = lambda x: self.download(*x)
-        iterate(self.threadpool.imap_unordered(downloader, args))
+        local_paths = list(map(lambda x: str(Path(local_directory).joinpath(x)), s3_paths))
+        self.download_files_list(access_key_id, bucket, local_paths, s3_paths, update)
 
     @close
     def read(
@@ -253,12 +259,19 @@ class S3:
             bucket: str | bytes,
             local_files: List[str],
             s3_paths: List[str] = None,
+            update: bool = True,
     ):
         """upload list of files to s3"""
+        existing_s3_paths = []
         if s3_paths is None:
             s3_paths = local_files
+        if update:
+            existing_s3_paths = self.list_dirs(access_key_id, bucket, '')
         uploader = lambda x: self.upload(*x)
-        args = map(lambda x: [access_key_id] + [bucket] + list(x), zip(list(map(Path, local_files)), s3_paths))
+        args = map(
+            lambda x: [access_key_id] + [bucket] + list(x) + [existing_s3_paths, ],
+            zip(list(map(Path, local_files)), s3_paths)
+        )
         iterate(self.threadpool.imap_unordered(uploader, args))
 
     @close
@@ -268,6 +281,7 @@ class S3:
             bucket: str,
             local_directory: str,
             s3_directory: str = '',
+            update: bool = True,
     ):
         """upload directory to s3"""
         local_files = frozenset(get_files_names(local_directory))
@@ -279,4 +293,5 @@ class S3:
             bucket,
             local_files=local_files,
             s3_paths=map(s3_path, local_files),
+            update=update,
         )
