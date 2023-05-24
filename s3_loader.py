@@ -217,7 +217,7 @@ class S3:
         s3_paths = self.list_dirs(access_key_id, bucket, s3_directory)
         if not local_directory.endswith('/'):
             local_directory += '/'
-        local_paths = list(map(lambda x: str(Path(local_directory).joinpath(x)), s3_paths))
+        local_paths = list(map(lambda x: str(Path(local_directory).joinpath(x)).replace(s3_directory, ''), s3_paths))
         self.download_files_list(access_key_id, bucket, local_paths, s3_paths, update)
 
     @close
